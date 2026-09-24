@@ -2,6 +2,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -10,6 +11,7 @@ from app.schemas.schemas import (
     HangRequest,
     OccupancyOut,
     OccupancySeg,
+    OrderCreate,
     OrderOut,
     PickupRequest,
     RailOut,
@@ -38,6 +40,32 @@ def rails(db: Session = Depends(get_db)):
 @api_router.get("/orders", response_model=list[OrderOut])
 def orders(db: Session = Depends(get_db)):
     return db.scalars(select(WorkOrder).order_by(WorkOrder.id.desc())).all()
+
+
+@api_router.post("/orders", response_model=OrderOut, status_code=201)
+def create_order(body: OrderCreate, db: Session = Depends(get_db)):
+    if not db.get(Store, body.store_id):
+        raise HTTPException(404, "门店不存在")
+    if db.scalar(select(WorkOrder.id).where(WorkOrder.ticket_code == body.ticket_code)):
+        raise HTTPException(409, "票号已存在")
+    order = WorkOrder(
+        store_id=body.store_id,
+        ticket_code=body.ticket_code,
+        garment_name=body.garment_name,
+        length_cm=body.length_cm,
+        # 新建工单只允许 ready，必须经 /hang 上杆，禁止直接落成 hung
+        status="ready",
+        due_at=body.due_at,
+        hung_at=None,
+    )
+    db.add(order)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, "票号已存在")
+    db.refresh(order)
+    return order
 
 
 @api_router.get("/occupancy/{rail_id}", response_model=OccupancyOut)
