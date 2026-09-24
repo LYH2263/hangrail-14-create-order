@@ -1,7 +1,8 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -10,6 +11,7 @@ from app.schemas.schemas import (
     HangRequest,
     OccupancyOut,
     OccupancySeg,
+    OrderCreate,
     OrderOut,
     PickupRequest,
     RailOut,
@@ -38,6 +40,45 @@ def rails(db: Session = Depends(get_db)):
 @api_router.get("/orders", response_model=list[OrderOut])
 def orders(db: Session = Depends(get_db)):
     return db.scalars(select(WorkOrder).order_by(WorkOrder.id.desc())).all()
+
+
+@api_router.post("/orders", response_model=OrderOut, status_code=201)
+def create_order(body: OrderCreate, db: Session = Depends(get_db)):
+    ticket = body.ticket_code.strip()
+    garment = body.garment_name.strip()
+    if not ticket or not garment:
+        raise HTTPException(400, "票号与衣名不能为空")
+
+    due = body.due_at
+    if due.tzinfo is None:
+        due = due.replace(tzinfo=timezone.utc)
+    if due < datetime.now(timezone.utc):
+        raise HTTPException(400, "到期时间不得早于创建时刻")
+
+    if db.scalar(select(WorkOrder.id).where(WorkOrder.ticket_code == ticket).limit(1)):
+        raise HTTPException(409, "票号已存在")
+
+    store = db.scalar(select(Store).order_by(Store.id).limit(1))
+    if not store:
+        raise HTTPException(404, "门店不存在，请先创建门店")
+
+    # 建单只能是 ready；入参中没有 status 字段，上杆必须走 /hang
+    order = WorkOrder(
+        store_id=store.id,
+        ticket_code=ticket,
+        garment_name=garment,
+        length_cm=body.length_cm,
+        status="ready",
+        due_at=due.astimezone(timezone.utc).replace(tzinfo=None),
+    )
+    db.add(order)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, "票号已存在")
+    db.refresh(order)
+    return order
 
 
 @api_router.get("/occupancy/{rail_id}", response_model=OccupancyOut)
